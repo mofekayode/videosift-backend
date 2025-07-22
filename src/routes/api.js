@@ -78,23 +78,71 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
     
     // Extract channel ID from URL
     let channelId = channelUrl;
+    let needsResolution = false;
+    
     if (channelUrl.includes('youtube.com')) {
       const match = channelUrl.match(/(?:\/channel\/|\/c\/|\/user\/|@)([a-zA-Z0-9_-]+)/);
       if (match) {
         channelId = match[1];
-        // If it's a handle (@username), we need to resolve it to a channel ID
-        if (channelUrl.includes('@')) {
-          // For now, we'll use the handle as-is
-          // In production, you'd use YouTube API to resolve handle to channel ID
-          console.log('📌 Channel handle detected:', channelId);
+        // If it's NOT already a valid channel ID, we need to resolve it
+        if (!channelId.startsWith('UC') && !channelId.startsWith('HC')) {
+          needsResolution = true;
+          console.log('📌 Channel identifier needs resolution:', channelId);
         }
       }
+    }
+    
+    // Resolve channel handle/username to actual YouTube channel ID
+    if (needsResolution) {
+      try {
+        console.log('🔍 Resolving channel identifier to YouTube channel ID...');
+        const searchResponse = await fetch(
+          `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(channelId)}&maxResults=1&key=${process.env.YOUTUBE_API_KEY}`
+        );
+        
+        if (!searchResponse.ok) {
+          throw new Error('Failed to search for channel on YouTube');
+        }
+        
+        const searchData = await searchResponse.json();
+        
+        if (!searchData.items || searchData.items.length === 0) {
+          return res.status(404).json({ error: 'Channel not found on YouTube' });
+        }
+        
+        const actualChannelId = searchData.items[0].id.channelId;
+        const channelTitle = searchData.items[0].snippet.title || `Channel ${actualChannelId}`;
+        console.log('✅ Resolved to YouTube channel ID:', actualChannelId, 'Title:', channelTitle);
+        
+        // Validate the resolved channel ID
+        if (!actualChannelId || (!actualChannelId.startsWith('UC') && !actualChannelId.startsWith('HC'))) {
+          console.error('❌ Invalid YouTube channel ID resolved:', actualChannelId);
+          return res.status(400).json({ error: 'Invalid YouTube channel ID format' });
+        }
+        
+        channelId = actualChannelId;
+        
+        // Store the resolved title for later use
+        req.resolvedChannelTitle = channelTitle;
+      } catch (error) {
+        console.error('❌ Error resolving channel:', error);
+        return res.status(500).json({ error: 'Failed to resolve channel identifier' });
+      }
+    }
+    
+    // Final validation before creating channel
+    if (!channelId.startsWith('UC') && !channelId.startsWith('HC')) {
+      console.error('❌ Invalid YouTube channel ID format:', channelId);
+      return res.status(400).json({ 
+        error: 'Invalid YouTube channel ID. Must start with UC or HC.',
+        receivedId: channelId 
+      });
     }
     
     // Create channel record first
     const channelData = {
       youtube_channel_id: channelId,
-      title: `Channel ${channelId}`, // Will be updated when processing
+      title: req.resolvedChannelTitle || `Channel ${channelId}`, // Use resolved title if available
       status: 'pending'
     };
     
