@@ -9,7 +9,20 @@ router.get('/channels', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get channels owned by or accessible to the user
+    // Get channels accessible to the user through user_channels table
+    const { data: userChannelRelations, error: relError } = await supabase
+      .from('user_channels')
+      .select('channel_id')
+      .eq('user_id', userId);
+    
+    if (relError) throw relError;
+    
+    if (!userChannelRelations || userChannelRelations.length === 0) {
+      return res.json({ success: true, channels: [] });
+    }
+    
+    const channelIds = userChannelRelations.map(rel => rel.channel_id);
+    
     const { data: channels, error } = await supabase
       .from('channels')
       .select(`
@@ -23,13 +36,13 @@ router.get('/channels', authMiddleware, async (req, res) => {
         created_at,
         last_indexed_at
       `)
-      .or(`owner_user_id.eq.${userId}`)
+      .in('id', channelIds)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
 
     // Get processing status for each channel
-    const channelIds = channels.map(c => c.id);
+    // channelIds already declared above, no need to redeclare
     const { data: queueItems } = await supabase
       .from('channel_queue')
       .select('channel_id, status, videos_processed, total_videos')
@@ -221,11 +234,11 @@ router.get('/usage-stats', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get channel count
+    // Get channel count from user_channels table
     const { count: channelCount } = await supabase
-      .from('channels')
+      .from('user_channels')
       .select('*', { count: 'exact', head: true })
-      .eq('owner_user_id', userId);
+      .eq('user_id', userId);
 
     // Get total message count
     const { count: totalMessages } = await supabase
@@ -340,30 +353,38 @@ router.delete('/channels/:id', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     const channelId = req.params.id;
 
-    // Verify ownership
-    const { data: channel, error: checkError } = await supabase
-      .from('channels')
-      .select('owner_user_id')
-      .eq('id', channelId)
+    // Verify user has access to this channel
+    const { data: userChannelRelation, error: checkError } = await supabase
+      .from('user_channels')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('channel_id', channelId)
       .single();
 
-    if (checkError || !channel) {
-      return res.status(404).json({ error: 'Channel not found' });
+    if (checkError || !userChannelRelation) {
+      return res.status(404).json({ error: 'Channel not found or no access' });
     }
 
-    if (channel.owner_user_id !== userId) {
-      return res.status(403).json({ error: 'Not authorized to delete this channel' });
-    }
-
-    // Delete channel (cascade will handle related records)
+    // Remove user's access to the channel (don't delete the channel itself)
     const { error: deleteError } = await supabase
-      .from('channels')
+      .from('user_channels')
       .delete()
-      .eq('id', channelId);
+      .eq('user_id', userId)
+      .eq('channel_id', channelId);
 
     if (deleteError) throw deleteError;
 
-    res.json({ success: true, message: 'Channel deleted successfully' });
+    // Check if any other users still have access to this channel
+    const { count } = await supabase
+      .from('user_channels')
+      .select('*', { count: 'exact', head: true })
+      .eq('channel_id', channelId);
+
+    // If no other users have access, optionally mark channel as orphaned
+    // For now, we'll leave channels even if no users have access
+    // This allows re-indexing without losing data
+
+    res.json({ success: true, message: 'Channel removed from your list successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

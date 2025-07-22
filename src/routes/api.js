@@ -22,9 +22,18 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
     
     console.log('🎯 Processing channel request:', { channelUrl, clerkUserId, userEmail });
     
-    // Get the actual user from database using Clerk ID
-    let dbUser = null;
-    if (clerkUserId && clerkUserId !== 'api-client') {
+    // Get the actual user from database
+    let userId = null;
+    
+    // Check if clerkUserId is actually a Supabase UUID (from frontend)
+    const isUUID = clerkUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clerkUserId);
+    
+    if (isUUID) {
+      // This is already a Supabase user ID from the frontend
+      console.log('📌 Received Supabase user ID directly:', clerkUserId);
+      userId = clerkUserId;
+    } else if (clerkUserId && clerkUserId !== 'api-client') {
+      // This is a Clerk ID, need to look up the Supabase user
       const { data: userData } = await supabase
         .from('users')
         .select('id')
@@ -32,7 +41,7 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
         .single();
       
       if (userData) {
-        dbUser = userData;
+        userId = userData.id;
       } else if (userEmail) {
         // Try to find by email if no clerk_id match
         const { data: userByEmail } = await supabase
@@ -40,11 +49,32 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
           .select('id')
           .eq('email', userEmail)
           .single();
-        dbUser = userByEmail;
+        userId = userByEmail?.id || null;
       }
     }
     
-    const userId = dbUser?.id || null;
+    // Check user's current channel count if authenticated
+    if (userId) {
+      const { data: userChannels } = await supabase
+        .from('user_channels')
+        .select('channel_id')
+        .eq('user_id', userId);
+      
+      const channelCount = userChannels?.length || 0;
+      console.log(`📊 User currently has ${channelCount} channels`);
+      
+      // Check if user has reached their channel limit (1 for beta users)
+      const channelLimit = 1; // Beta limit
+      if (channelCount >= channelLimit) {
+        console.log('❌ User has reached channel limit');
+        return res.status(403).json({ 
+          error: `Channel limit reached. Beta users can index up to ${channelLimit} channel.`,
+          quotaExceeded: true,
+          currentCount: channelCount,
+          limit: channelLimit
+        });
+      }
+    }
     
     // Extract channel ID from URL
     let channelId = channelUrl;
@@ -68,9 +98,9 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
       status: 'pending'
     };
     
-    // Only add owner_user_id if we have a valid user ID
+    // Only add original_owner_id if we have a valid user ID (for historical reference)
     if (userId) {
-      channelData.owner_user_id = userId;
+      channelData.original_owner_id = userId;
     }
     
     const { data: channel, error: channelError } = await supabase
@@ -92,6 +122,61 @@ router.post('/channels/process', authMiddleware, rateLimitMiddleware('channel_pr
         .eq('youtube_channel_id', channelId)
         .single();
       existingChannel = data;
+    }
+    
+    // Check if user already has access to this channel
+    if (userId && existingChannel) {
+      const { data: existingAccess } = await supabase
+        .from('user_channels')
+        .select()
+        .eq('user_id', userId)
+        .eq('channel_id', existingChannel.id)
+        .single();
+        
+      if (existingAccess) {
+        console.log('✅ User already has access to this channel');
+        return res.json({ 
+          success: true, 
+          message: 'You already have access to this channel',
+          channelId: existingChannel.youtube_channel_id,
+          alreadyIndexed: true
+        });
+      }
+    }
+    
+    // Create user-channel relationship if user is authenticated
+    if (userId && existingChannel) {
+      console.log('🔗 Creating user-channel relationship:', { userId, channelId: existingChannel.id });
+      
+      // First check if relationship already exists
+      const { data: existingRelation } = await supabase
+        .from('user_channels')
+        .select()
+        .eq('user_id', userId)
+        .eq('channel_id', existingChannel.id)
+        .single();
+      
+      if (!existingRelation) {
+        const { data: newRelation, error: relationshipError } = await supabase
+          .from('user_channels')
+          .insert({
+            user_id: userId,
+            channel_id: existingChannel.id
+          })
+          .select()
+          .single();
+        
+        if (relationshipError) {
+          console.error('❌ Error creating user-channel relationship:', relationshipError);
+          // Continue processing even if relationship creation fails
+        } else {
+          console.log('✅ User-channel relationship created successfully:', newRelation);
+        }
+      } else {
+        console.log('✅ User-channel relationship already exists:', existingRelation);
+      }
+    } else {
+      console.log('⚠️ Skipping user-channel relationship:', { userId, existingChannel: !!existingChannel });
     }
     
     // Create queue entry

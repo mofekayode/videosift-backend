@@ -2,17 +2,17 @@ import { supabase } from '../server.js';
 
 const RATE_LIMITS = {
   anonymous: {
-    chat: { hourly: 30, daily: null },
+    chat: { hourly: 5, daily: 5 },
     video_upload: { hourly: null, daily: 2 },
     channel_process: { hourly: null, daily: 0 }
   },
   user: {
-    chat: { hourly: 30, daily: null },
+    chat: { hourly: 5, daily: 5 },
     video_upload: { hourly: null, daily: 10 },
     channel_process: { hourly: null, daily: 1 }
   },
   premium: {
-    chat: { hourly: 100, daily: null },
+    chat: { hourly: 50, daily: 200 },
     video_upload: { hourly: null, daily: 50 },
     channel_process: { hourly: null, daily: 10 }
   }

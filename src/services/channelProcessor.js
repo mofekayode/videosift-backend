@@ -19,7 +19,7 @@ class ChannelProcessor {
             id,
             youtube_channel_id,
             title,
-            owner_user_id
+            original_owner_id
           ),
           users!channel_queue_requested_by_fkey (
             id,
